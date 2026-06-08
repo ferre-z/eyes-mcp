@@ -1,0 +1,40 @@
+# Minimal SearXNG settings for the docker-compose stack.
+# IMPORTANT: replace `secret_key` with `openssl rand -hex 32` before exposing
+# this service to the network. Do not commit the real key.
+
+use_default_settings: true
+general:
+  debug: false
+  instance_name: "Eyes-MCP SearXNG"
+
+server:
+  bind_address: "0.0.0.0"
+  port: 8080
+  secret_key: "REPLACE_ME_WITH_openssl_rand_hex_32"
+  limiter: true
+  image_proxy: true
+
+search:
+  formats:
+    - html
+    - json
+
+engines:
+  - name: google
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: arxiv
+    disabled: false
+  - name: github
+    disabled: false
+  - name: reddit
+    disabled: false
+  - name: wikipedia
+    disabled: false
