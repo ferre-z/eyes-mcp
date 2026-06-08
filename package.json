@@ -4,6 +4,19 @@
   "description": "Research MCP for AI agents. Docker-packaged. Swarm-ready.",
   "type": "module",
   "private": true,
+  "bin": {
+    "eyes": "./bin/eyes.mjs"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "searxng",
+    "docker-compose.yml",
+    "Dockerfile",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
   "engines": {
     "node": ">=20"
   },
@@ -11,15 +24,21 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
+    "eyes": "tsx src/cli/index.ts",
+    "eyes:build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build",
     "test": "vitest run",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@clack/prompts": "^1.5.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "meow": "^14.1.0",
     "p-limit": "^6.2.0",
+    "picocolors": "^1.1.1",
     "undici": "^6.21.0",
     "winston": "^3.17.0",
     "zod": "^3.23.8"
