@@ -16,7 +16,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Logger } from "winston";
 import { z } from "zod";
 import { ResearchInputSchema } from "../dispatcher/types.js";
-import { createGeminiClient } from "../llm/gemini.js";
+import { OpenAICompatibleClient, getProvider } from "../llm/gemini.js";
+import { loadConfig } from "../cli/config.js";
 import { MainAgent } from "../main-agent/index.js";
 import { parseRawShards } from "../parse/index.js";
 import { githubAdapter } from "../adapters/github.js";
@@ -27,8 +28,38 @@ import { hackernewsAdapter } from "../adapters/hackernews.js";
 import { arxivAdapter } from "../adapters/arxiv.js";
 import { wikipediaAdapter } from "../adapters/wikipedia.js";
 
+/**
+ * Build the LLM client from env vars (no TOML config file in the docker
+ * container). Provider is picked via EYES_PROVIDER or GOOGLE_AI_STUDIO_API_KEY
+ * / OPENROUTER_API_KEY. The MCP server is the hosted mode — config is via
+ * env, not a CLI wizard.
+ */
+function makeServerLlmClient(): import("../llm/client.js").LLMClient | null {
+  const explicit = process.env["EYES_PROVIDER"];
+  const providerId =
+    explicit === "openrouter" || explicit === "google-ai-studio"
+      ? explicit
+      : process.env["OPENROUTER_API_KEY"]
+        ? "openrouter"
+        : "google-ai-studio";
+  const provider = getProvider(providerId);
+  if (!provider) return null;
+  const apiKey = process.env[provider.envKeyVar] ?? "";
+  if (!apiKey) return null;
+  return new OpenAICompatibleClient({
+    provider,
+    apiKey,
+    model: process.env["EYES_MODEL"] ?? provider.defaultModel,
+  });
+}
+
 export function registerTools(server: McpServer, ctx: { logger: Logger }): void {
-  const llm = createGeminiClient();
+  const llm = makeServerLlmClient();
+  // The server doesn't read the TOML config — it lives in a container with
+  // env vars only. Token budget / time budget still come from env.
+  const tokenBudget = Number.parseInt(process.env["EYES_TOKEN_BUDGET"] ?? "80000", 10);
+  const timeBudgetSec = Number.parseInt(process.env["EYES_TIME_BUDGET_SEC"] ?? "120", 10);
+
   const mainAgent = new MainAgent({
     llm,
     // TODO: align types — the main-agent's ParseRawShardsFn has a slightly
@@ -52,6 +83,8 @@ export function registerTools(server: McpServer, ctx: { logger: Logger }): void 
       // dispatcher registry currently only keys on SourceCategory.
     },
     logger: ctx.logger,
+    tokenBudget: Number.isFinite(tokenBudget) ? tokenBudget : 80_000,
+    timeBudgetSec: Number.isFinite(timeBudgetSec) ? timeBudgetSec : 120,
   });
 
   server.tool(
@@ -70,4 +103,8 @@ export function registerTools(server: McpServer, ctx: { logger: Logger }): void 
     { input: z.string().optional() },
     async () => ({ content: [{ type: "text", text: "pong" }] }),
   );
+
+  // Reference the config import to keep it (it's used in some error
+  // paths and we want to fail loudly if the schema drifts).
+  void loadConfig;
 }

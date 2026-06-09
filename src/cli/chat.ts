@@ -16,7 +16,8 @@ import { createInterface, type Interface as RLInterface } from "node:readline/pr
 import { stdin, stdout } from "node:process";
 import path from "node:path";
 import { MainAgent } from "../main-agent/index.js";
-import { createGeminiClient } from "../llm/gemini.js";
+import { OpenAICompatibleClient, getProvider } from "../llm/gemini.js";
+import type { LLMClient } from "../llm/client.js";
 import { loadConfig } from "./config.js";
 import type { Logger } from "winston";
 import {
@@ -169,7 +170,7 @@ async function runTurn(
     const { tmpdir } = await import("node:os");
     dataDir = await mkdtemp(path.join(tmpdir(), "eyes-"));
   }
-  const llm = createGeminiClient();
+  const llm = makeLlmClient(cfg, flags.model);
   const agent = new MainAgent({
     llm,
     adapters: await loadAdapters(),
@@ -288,6 +289,24 @@ async function loadAdapters(): Promise<Record<string, unknown>> {
     arxiv: arxivAdapter,
     wikipedia: wikipediaAdapter,
   } as Record<string, unknown>;
+}
+
+function makeLlmClient(
+  cfg: Awaited<ReturnType<typeof loadConfig>>,
+  modelOverride: string | undefined,
+): LLMClient | null {
+  const provider = getProvider(cfg.providers.active);
+  if (!provider) return null;
+  const apiKey =
+    provider.id === "google-ai-studio"
+      ? cfg.provider_google_ai_studio.apiKey
+      : cfg.provider_openrouter.apiKey;
+  if (!apiKey || apiKey.length === 0) return null;
+  return new OpenAICompatibleClient({
+    provider,
+    apiKey,
+    model: modelOverride ?? cfg.providers.model,
+  });
 }
 
 function consoleLogger(): Pick<Logger, "info" | "warn" | "error" | "debug"> {

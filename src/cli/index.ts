@@ -26,12 +26,16 @@ import { startServer } from "./server.js";
 import { configCmd } from "./config-cmd.js";
 import { initCmd } from "./init.js";
 import { doctor } from "./doctor.js";
+import { modelsCmd } from "./models.js";
 
 export const cli = meow(
   `
 ${neon("Usage")}
   $ eyes                        ${dimRed("open the chat REPL")}
   $ eyes chat <prompt>          ${dimRed("one-shot research question")}
+  $ eyes models list            ${dimRed("show all free models across providers")}
+  $ eyes models pick            ${dimRed("interactive wizard: provider + model + key")}
+  $ eyes models current         ${dimRed("print the active provider + model")}
   $ eyes serve                  ${dimRed("start the MCP HTTP server")}
   $ eyes config                 ${dimRed("interactive config editor")}
   $ eyes config get <key>       ${dimRed("print a config value")}
@@ -49,9 +53,10 @@ ${neon("Options")}
   --no-color        ${dimRed("disable neon red output")}
 
 ${neon("Examples")}
+  $ eyes models pick                       ${dimRed("# first-time setup")}
   $ eyes ${dimRed(`"what's the latest on gemma 4 31b?"`)}
   $ eyes chat ${dimRed(`"compare bun and deno for scripting"`)} --depth deep
-  $ eyes config set llm.model gemma-4-31b-it
+  $ eyes config set providers.model llama-3.3-70b
   $ eyes doctor
 `,
   {
@@ -85,6 +90,9 @@ try {
         reveal: cli.flags.reveal,
         json: cli.flags.json,
       });
+      break;
+    case "models":
+      exitCode = await modelsCmd(rest, { reveal: cli.flags.reveal, json: cli.flags.json });
       break;
     case "init":
       exitCode = await initCmd({ force: false, reveal: cli.flags.reveal, json: cli.flags.json });

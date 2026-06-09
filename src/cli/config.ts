@@ -29,11 +29,18 @@ export interface EyesConfig {
     port: number;
     logLevel: string;
   };
-  llm: {
-    provider: "gemini" | "anthropic" | "openai" | "none";
-    apiKey: string;
+  /** Which LLM provider to use. One of the entries in src/llm/gemini.ts. */
+  providers: {
+    active: "google-ai-studio" | "openrouter";
     model: string;
-    baseUrl: string;
+  };
+  /** API key for the Google AI Studio provider. Empty = not set. */
+  provider_google_ai_studio: {
+    apiKey: string;
+  };
+  /** API key for the OpenRouter provider. Empty = not set. */
+  provider_openrouter: {
+    apiKey: string;
   };
   sources: {
     githubToken: string;
@@ -53,12 +60,9 @@ export interface EyesConfig {
 
 export const DEFAULTS: EyesConfig = {
   server: { host: "0.0.0.0", port: 8787, logLevel: "info" },
-  llm: {
-    provider: "none",
-    apiKey: "",
-    model: "gemma-4-31b-it",
-    baseUrl: "https://generativelanguage.googleapis.com",
-  },
+  providers: { active: "google-ai-studio", model: "gemma-4-31b-it" },
+  provider_google_ai_studio: { apiKey: "" },
+  provider_openrouter: { apiKey: "" },
   sources: { githubToken: "", redditClientId: "", redditClientSecret: "" },
   agents: {
     maxShards: 5,
@@ -73,7 +77,8 @@ export const DEFAULTS: EyesConfig = {
 
 /** Keys whose values must not be printed unless `--reveal` is passed. */
 export const SECRET_KEYS: ReadonlySet<string> = new Set([
-  "llm.apiKey",
+  "provider_google_ai_studio.apiKey",
+  "provider_openrouter.apiKey",
   "sources.githubToken",
   "sources.redditClientId",
   "sources.redditClientSecret",
@@ -102,10 +107,35 @@ export async function loadConfig(p?: string): Promise<EyesConfig> {
     const raw = await readFile(filePath, "utf8");
     fromFile = parseToml(raw);
   }
+  // Back-compat: a v0.1 config file had `[llm]` instead of the new
+  // `[providers]` + `[provider_*]` sections. Migrate it on read.
+  migrateLegacy(fromFile);
   const merged: EyesConfig = mergeDeep(structuredClone(DEFAULTS), fromFile as EyesConfig);
   // Env wins for secrets and the most common operational knobs.
   applyEnvOverrides(merged);
   return merged;
+}
+
+function migrateLegacy(raw: Record<string, unknown>): void {
+  const legacy = raw["llm"] as Record<string, unknown> | undefined;
+  if (!legacy) return;
+  const providers = (raw["providers"] as Record<string, unknown> | undefined) ?? {};
+  if (!providers["active"] && typeof legacy["provider"] === "string") {
+    if (legacy["provider"] === "gemini") providers["active"] = "google-ai-studio";
+    else if (legacy["provider"] === "openai") providers["active"] = "openrouter";
+  }
+  if (!providers["model"] && typeof legacy["model"] === "string") {
+    providers["model"] = legacy["model"];
+  }
+  raw["providers"] = providers;
+  // Migrate the old apiKey into the new section, prefer google-ai-studio.
+  if (typeof legacy["apiKey"] === "string" && legacy["apiKey"].length > 0) {
+    const g = (raw["provider_google_ai_studio"] as Record<string, unknown> | undefined) ?? {};
+    if (!g["apiKey"]) g["apiKey"] = legacy["apiKey"];
+    raw["provider_google_ai_studio"] = g;
+  }
+  // Drop the old key so mergeDeep doesn't try to copy `llm` into DEFAULTS.
+  delete raw["llm"];
 }
 
 // ---------------------------------------------------------------------------
@@ -163,24 +193,39 @@ export async function setKey(
 function applyEnvOverrides(cfg: EyesConfig): void {
   const map: ReadonlyArray<[string, () => void]> = [
     [
+      "GOOGLE_AI_STUDIO_API_KEY",
+      () => {
+        const v = process.env["GOOGLE_AI_STUDIO_API_KEY"];
+        if (v && v.length > 0) cfg.provider_google_ai_studio.apiKey = v;
+      },
+    ],
+    [
+      "OPENROUTER_API_KEY",
+      () => {
+        const v = process.env["OPENROUTER_API_KEY"];
+        if (v && v.length > 0) cfg.provider_openrouter.apiKey = v;
+      },
+    ],
+    // Back-compat: legacy GEMINI_* vars still work and map onto the new section.
+    [
       "GEMINI_API_KEY",
       () => {
         const v = process.env["GEMINI_API_KEY"];
-        if (v && v.length > 0) cfg.llm.apiKey = v;
+        if (v && v.length > 0) cfg.provider_google_ai_studio.apiKey = v;
       },
     ],
     [
-      "GEMINI_MODEL",
+      "EYES_PROVIDER",
       () => {
-        const v = process.env["GEMINI_MODEL"];
-        if (v && v.length > 0) cfg.llm.model = v;
+        const v = process.env["EYES_PROVIDER"];
+        if (v === "google-ai-studio" || v === "openrouter") cfg.providers.active = v;
       },
     ],
     [
-      "GEMINI_BASE_URL",
+      "EYES_MODEL",
       () => {
-        const v = process.env["GEMINI_BASE_URL"];
-        if (v && v.length > 0) cfg.llm.baseUrl = v;
+        const v = process.env["EYES_MODEL"];
+        if (v && v.length > 0) cfg.providers.model = v;
       },
     ],
     [

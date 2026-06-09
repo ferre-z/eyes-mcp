@@ -14,7 +14,7 @@
 // =============================================================================
 
 import { request } from "undici";
-import { createGeminiClient } from "../llm/gemini.js";
+import { OpenAICompatibleClient, PROVIDERS, getProvider } from "../llm/gemini.js";
 import { loadConfig, getConfigPath } from "./config.js";
 import { dimRed, error, header, neon, okMark, failMark, success } from "./style.js";
 
@@ -47,7 +47,8 @@ export async function doctor(flags: DoctorFlags = {}): Promise<number> {
 
   // -- env vars (informational, not critical) -----------------------------
   const envChecks: ReadonlyArray<[string, boolean]> = [
-    ["GEMINI_API_KEY", !!process.env["GEMINI_API_KEY"]],
+    ["GOOGLE_AI_STUDIO_API_KEY", !!process.env["GOOGLE_AI_STUDIO_API_KEY"] || !!process.env["GEMINI_API_KEY"]],
+    ["OPENROUTER_API_KEY", !!process.env["OPENROUTER_API_KEY"]],
     ["GITHUB_TOKEN", !!process.env["GITHUB_TOKEN"]],
     ["REDDIT_CLIENT_ID", !!process.env["REDDIT_CLIENT_ID"]],
     ["SEARXNG_URL", !!process.env["SEARXNG_URL"]],
@@ -80,26 +81,52 @@ export async function doctor(flags: DoctorFlags = {}): Promise<number> {
   });
 
   // -- LLM (if configured) -------------------------------------------------
-  if (cfg && "llm" in cfg && cfg.llm.apiKey) {
-    try {
-      const llm = createGeminiClient();
-      if (llm) {
+  if (cfg && "providers" in cfg) {
+    const active = getProvider(cfg.providers.active);
+    const apiKey = active
+      ? active.id === "google-ai-studio"
+        ? cfg.provider_google_ai_studio.apiKey
+        : cfg.provider_openrouter.apiKey
+      : "";
+    if (active && apiKey) {
+      try {
+        const llm = new OpenAICompatibleClient({
+          provider: active,
+          apiKey,
+          model: cfg.providers.model,
+        });
         const t0 = Date.now();
         await llm.generate("ping", { maxTokens: 5 });
         checks.push({
-          name: "llm",
+          name: `llm (${active.id})`,
           ok: true,
-          detail: `${cfg.llm.model} responded in ${Date.now() - t0}ms`,
+          detail: `${cfg.providers.model} responded in ${Date.now() - t0}ms`,
+          critical: true,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        checks.push({
+          name: `llm (${active?.id ?? cfg.providers.active})`,
+          ok: false,
+          detail: msg,
           critical: true,
         });
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      checks.push({ name: "llm", ok: false, detail: msg, critical: true });
+    } else {
+      checks.push({
+        name: "llm",
+        ok: true,
+        detail: `not configured (heuristic mode) — set EYES_PROVIDER + an API key, or run 'eyes models pick'`,
+        critical: false,
+      });
     }
   } else {
     checks.push({ name: "llm", ok: true, detail: "not configured (heuristic mode)", critical: false });
   }
+
+  // Render one extra info line for the provider catalog.
+  const catalog = PROVIDERS.map((p) => `${p.id} (${p.freeModels.length} free models)`).join(", ");
+  process.stdout.write(dimRed(`  providers: ${catalog}\n`));
 
   // -- render --------------------------------------------------------------
   process.stdout.write(header("doctor") + "\n\n");
