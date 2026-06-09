@@ -8,7 +8,7 @@ The container is bound to **`0.0.0.0:51823`** on the orius server, so if you're 
 
 ## Goal
 
-You have a research tool called **Eyes-MCP** exposed at `http://127.0.0.1:51823/mcp`. Verify it works end-to-end: discover its tools, run a real research query through it, and check the output is useful.
+You have a research tool called **Eyes-MCP** exposed at `http://100.93.242.126:51823/mcp` (the orius server, on Tailscale — no SSH tunnel needed). Verify it works end-to-end: discover its tools, run a real research query through it, and check the output is useful.
 
 ## What "works" means
 
@@ -35,7 +35,7 @@ In opencode, ask:
 List the tools exposed by the eyes MCP server.
 ```
 
-(How exactly to phrase this depends on your opencode version. If opencode doesn't auto-list MCP tools, the equivalent is `tools/list` against `http://127.0.0.1:51823/mcp`.)
+(How exactly to phrase this depends on your opencode version. If opencode doesn't auto-list MCP tools, the equivalent is `tools/list` against `http://100.93.242.126:51823/mcp`.)
 
 Expected: `research` and `ping`.
 
@@ -126,7 +126,9 @@ If the docker stack is on a different machine (the `orius` server) and opencode 
 ssh -N -L 51823:127.0.0.1:51823 orius
 ```
 
-Then opencode on your laptop points at `http://127.0.0.1:51823/mcp` exactly the same way — the SSH tunnel makes localhost on your laptop look like localhost on the server.
+Then opencode on your laptop points at `http://100.93.242.126:51823/mcp` exactly the same way — the Tailscale network routes it for you, no tunnel needed.
+
+(If you don't have Tailscale, swap in `127.0.0.1` for the IP, then use the SSH command above.)
 
 The same trick works for `searxng` (8080) and `crawl4ai` (11235) if you want to poke at them directly, but you don't need to — eyes on the same Docker network already talks to them.
 
