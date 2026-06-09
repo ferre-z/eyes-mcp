@@ -1,6 +1,8 @@
 # Eyes-MCP — opencode test prompt
 
-> Drop this into opencode as a message, or save it as `Eyes-MCP-test.md` in a folder opencode watches, and tell opencode to act on it. Assumes you cloned and started the container (see `README.md`), and that opencode is on the same machine as the container (or you have an SSH tunnel — see "Remote box" at the bottom).
+> Drop this into opencode as a message, or save it as `Eyes-MCP-test.md` in a folder opencode watches, and tell opencode to act on it. Assumes you cloned and started the container (see `README.md`), and that opencode is on the same machine as the container (or you have a Tailscale route / SSH tunnel — see "Remote box" at the bottom).
+
+The container is bound to **`0.0.0.0:51823`** on the orius server, so if you're on the same Tailscale network as orius, you don't need an SSH tunnel — opencode can talk to it directly.
 
 ---
 
@@ -20,7 +22,7 @@ You have a research tool called **Eyes-MCP** exposed at `http://127.0.0.1:51823/
 ### Step 1 — health check
 
 ```bash
-curl -s http://127.0.0.1:51823/health
+curl -s http://100.93.242.126:51823/health
 ```
 
 Expected: `{"status":"ok",...}`. If it hangs, the container is not up — re-run the docker compose / docker run command from the README.
@@ -135,7 +137,7 @@ The same trick works for `searxng` (8080) and `crawl4ai` (11235) if you want to 
   "mcpServers": {
     "eyes": {
       "type": "http",
-      "url": "http://127.0.0.1:51823/mcp"
+      "url": "http://100.93.242.126:51823/mcp"
     }
   }
 }
