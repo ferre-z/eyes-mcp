@@ -3,9 +3,14 @@
 //
 // Owns: HTTP server, /health, /mcp, signal handling, graceful shutdown.
 // Does NOT own: tool implementations, agent logic, source adapters, parsing.
-// Those are owned by subagents B and C and wired in via ./tools/index.js.
+// Those are wired in via ./tools/index.js.
 //
 // Transport: streamable HTTP, stateful sessions, multi-tenant.
+//
+// Multi-tenant = one (McpServer, StreamableHTTPServerTransport) pair PER
+// SESSION, keyed by Mcp-Session-Id header. The transport is the unit of
+// session state; reusing it across sessions is the single-tenant pattern,
+// which breaks when multiple agents connect.
 // =============================================================================
 
 import "dotenv/config";
@@ -17,40 +22,48 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 
 import { logger, createRequestLogger } from "./util/logger.js";
 import { handleHealth } from "./health.js";
-// TODO(subagent-B): replace stub with real tool registration.
 import { registerTools } from "./tools/index.js";
 
 const HOST = process.env["EYES_HTTP_HOST"] ?? "0.0.0.0";
 const PORT = Number.parseInt(process.env["EYES_HTTP_PORT"] ?? "8787", 10);
 
 // ---------------------------------------------------------------------------
-// Per-request MCP server factory. We build a new McpServer + transport for
-// every HTTP request so sessions stay isolated (multi-tenant, stateful).
+// Session registry: Mcp-Session-Id -> { server, transport }
 // ---------------------------------------------------------------------------
-function buildSession(req: Request, res: Response): { server: McpServer; transport: StreamableHTTPServerTransport } {
-  const reqLog = createRequestLogger(randomUUID());
+interface Session {
+  server: McpServer;
+  transport: StreamableHTTPServerTransport;
+}
+const sessions = new Map<string, Session>();
+
+function buildSession(sessionId: string): Session {
+  const reqLog = createRequestLogger(sessionId);
 
   const server = new McpServer(
     { name: "eyes-mcp", version: "0.1.0" },
     { capabilities: { tools: {} } },
   );
-
-  // TODO(subagent-B): tools get registered here.
   registerTools(server, { logger: reqLog });
 
   const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
-    // We handle request bodies ourselves via express.json() below.
+    // Use a fixed session id so the SDK recognizes returning requests for
+    // this session. We generate the id on the FIRST request (the one
+    // without the header) and propagate it.
+    sessionIdGenerator: () => sessionId,
     enableJsonResponse: true,
-    onsessioninitialized: (sessionId) => {
-      reqLog.info("mcp session initialized", { sessionId });
+    onsessioninitialized: () => {
+      reqLog.info("mcp session initialized");
     },
-    onsessionclosed: (sessionId) => {
-      reqLog.info("mcp session closed", { sessionId });
+    onsessionclosed: () => {
+      reqLog.info("mcp session closed");
+      sessions.delete(sessionId);
     },
   });
-  // Fires when the transport itself closes (e.g. HTTP connection dropped).
-  transport.onclose = () => reqLog.debug("mcp transport closed");
+  transport.onclose = () => {
+    reqLog.info("mcp transport closed");
+    sessions.delete(sessionId);
+  };
+  transport.onerror = (err) => reqLog.error("mcp transport error", { err: String(err) });
 
   return { server, transport };
 }
@@ -85,13 +98,26 @@ app.get("/health", (req, res) => {
   void handleHealth(req, res);
 });
 
-// MCP streamable HTTP endpoint. The SDK handles both POST (call) and
-// GET/DELETE (notifications/terminate) on the same path.
-const MCP_PATH = "/mcp";
-app.all(MCP_PATH, async (req: Request, res: Response) => {
-  const { server, transport } = buildSession(req, res);
+// MCP streamable HTTP endpoint — POST (call) + GET/DELETE (notifications).
+app.all("/mcp", async (req: Request, res: Response) => {
+  // Pull or mint a session id. For new sessions (the `initialize` call
+  // carries no Mcp-Session-Id header), the transport will assign one
+  // using sessionIdGenerator — which we wired to return OUR id.
+  const incoming = (req.headers["mcp-session-id"] as string | undefined) ?? "";
+  const sessionId = incoming.length > 0 ? incoming : randomUUID();
+
+  let session = sessions.get(sessionId);
+  if (!session) {
+    session = buildSession(sessionId);
+    sessions.set(sessionId, session);
+    // CRITICAL: connect the transport to the server BEFORE handling
+    // requests. Without this, the transport has no dispatcher and never
+    // writes a JSON-RPC reply to the client (the original bug).
+    await session.server.connect(session.transport);
+  }
+
   try {
-    await transport.handleRequest(req, res, req.body);
+    await session.transport.handleRequest(req, res, req.body);
   } catch (err) {
     logger.error("mcp request failed", {
       err: err instanceof Error ? err.message : String(err),
@@ -100,9 +126,6 @@ app.all(MCP_PATH, async (req: Request, res: Response) => {
     if (!res.headersSent) {
       res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "internal error" }, id: null });
     }
-  } finally {
-    // session cleanup is handled by transport.onclose above.
-    void server.close().catch(() => undefined);
   }
 });
 
@@ -119,24 +142,31 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
 // Boot
 // ---------------------------------------------------------------------------
 const httpServer = app.listen(PORT, HOST, () => {
-  logger.info("eyes-mcp listening", { host: HOST, port: PORT, mcpPath: MCP_PATH });
+  logger.info("eyes-mcp listening", { host: HOST, port: PORT, mcpPath: "/mcp" });
 });
 
 // ---------------------------------------------------------------------------
-// Graceful shutdown — give in-flight MCP requests up to 10s to drain.
+// Graceful shutdown — close all sessions, drain HTTP, then exit.
 // ---------------------------------------------------------------------------
 let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   logger.info("shutdown initiated", { signal });
-  // Stop accepting new connections.
+  for (const [id, s] of sessions) {
+    try {
+      await s.transport.close();
+      await s.server.close();
+    } catch (err) {
+      logger.error("session close error", { id, err: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  sessions.clear();
   httpServer.close((err) => {
     if (err) logger.error("http close error", { err: err.message });
     logger.info("shutdown complete");
     process.exit(err ? 1 : 0);
   });
-  // Hard exit if drain takes too long.
   setTimeout(() => {
     logger.warn("forced exit after 10s drain timeout");
     process.exit(1);
