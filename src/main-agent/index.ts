@@ -33,6 +33,17 @@ import { decompose } from "./decompose.js";
 import { review } from "./review.js";
 import { synthesize } from "./synthesize.js";
 
+/** Per-step LLM outcome, tracked across the run to report an honest `mode`. */
+interface LlmPathTracker {
+  /** True if any of the LLM calls (decompose / review / synthesize) succeeded. */
+  llmAttempted: boolean;
+  /** True if at least one LLM call SUCCEEDED (vs fell back to heuristic). */
+  llmSucceeded: boolean;
+}
+function freshLlmPath(): LlmPathTracker {
+  return { llmAttempted: false, llmSucceeded: false };
+}
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -208,10 +219,12 @@ export class MainAgent {
       mode: this.llm?.isConfigured ? "llm" : "heuristic",
     });
 
-    // Token tracking across the whole request.
-    let tokensIn = 0;
-    let tokensOut = 0;
+    // Token tracking across the whole request. Decompose, review, and
+    // synthesize each update this object when they make an LLM call.
+    const counters: { tokensIn: number; tokensOut: number } = { tokensIn: 0, tokensOut: 0 };
     const t0 = start;
+    // Track whether LLM actually produced output (vs falling back to heuristic).
+    const llmPath = freshLlmPath();
 
     // Available sources: expand "general" to the standard set.
     const availableSources = expandScope(input.scope);
@@ -219,7 +232,15 @@ export class MainAgent {
     // First decompose.
     let shards: Shard[] = await decompose(input.prompt, availableSources, input.maxShards, this.llm, {
       logger: log,
+      counters,
     });
+    // Track whether decompose fell back to heuristic. Heuristic decompose
+    // returns a valid answer with a clearly-identifiable marker.
+    const decomposeUsedHeuristic = shards.length > 0 && shards[0]?.why?.startsWith("[heuristic]") === true;
+    if (this.llm?.isConfigured) {
+      llmPath.llmAttempted = true;
+      if (!decomposeUsedHeuristic) llmPath.llmSucceeded = true;
+    }
     if (shards.length === 0) {
       // Shouldn't happen — heuristic guarantees ≥ 1 — but be safe.
       shards = [{
@@ -296,11 +317,28 @@ export class MainAgent {
         {
           remainingIterations: remaining,
           maxShards: input.maxShards,
-          usedTokens: tokensIn + tokensOut,
+          usedTokens: counters.tokensIn + counters.tokensOut,
           tokenBudget: this.tokenBudget,
           logger: log,
+          counters,
         },
       );
+      // `review` only returns type=refine when the LLM actually produced
+      // a refine decision. If it fell back, we get type=return with a
+      // heuristic summary. Track which path it took — both for the case
+      // where the agent returns immediately AND for the case where it
+      // says "refine" (which means LLM DID run for review).
+      if (this.llm?.isConfigured) {
+        if (decision.type === "return") {
+          // Heuristic summary starts with "Findings for:". LLM summaries do not.
+          if (!decision.answer.startsWith("Findings for:") && decision.answer.length > 0) {
+            llmPath.llmSucceeded = true;
+          }
+        } else if (decision.type === "refine") {
+          // type=refine is only produced by the LLM path.
+          llmPath.llmSucceeded = true;
+        }
+      }
 
       if (decision.type === "return") {
         log.info("main-agent: returning answer", { iter, chars: decision.answer.length });
@@ -309,9 +347,10 @@ export class MainAgent {
           decision.answer,
           allShardsMeta,
           iterations,
-          tokensIn,
-          tokensOut,
+          counters.tokensIn,
+          counters.tokensOut,
           Date.now() - start,
+          llmPath,
         );
       }
 
@@ -320,20 +359,24 @@ export class MainAgent {
       log.info("main-agent: refining", { iter, reason: decision.reason, newShards: decision.newShards.length });
 
       // Token-budget gate before allowing more iteration.
-      if (tokensIn + tokensOut >= this.tokenBudget) {
+      if (counters.tokensIn + counters.tokensOut >= this.tokenBudget) {
         log.warn("main-agent: token budget hit during refine, synthesizing with what we have");
-        const answer = await synthesize(allParsedShards, input.prompt, this.llm, {
-          outputFormat: input.outputFormat,
-          logger: log,
-        });
+        const answer = await trackSynthesizeLlm(
+          allParsedShards,
+          input.prompt,
+          this.llm,
+          { outputFormat: input.outputFormat, logger: log, counters },
+          llmPath,
+        );
         return this.buildOutput(
           input,
           answer,
           allShardsMeta,
           iterations,
-          tokensIn,
-          tokensOut,
+          counters.tokensIn,
+          counters.tokensOut,
           Date.now() - start,
+          llmPath,
         );
       }
 
@@ -342,18 +385,22 @@ export class MainAgent {
 
     // Loop exhausted (or broke out on time budget) — synthesize with what we have.
     log.info("main-agent: loop exhausted, synthesizing", { iterations, lastReason: lastReviewReason });
-    const answer = await synthesize(allParsedShards, input.prompt, this.llm, {
-      outputFormat: input.outputFormat,
-      logger: log,
-    });
+    const answer = await trackSynthesizeLlm(
+      allParsedShards,
+      input.prompt,
+      this.llm,
+      { outputFormat: input.outputFormat, logger: log, counters },
+      llmPath,
+    );
     return this.buildOutput(
       input,
       answer,
       allShardsMeta,
       iterations,
-      tokensIn,
-      tokensOut,
+      counters.tokensIn,
+      counters.tokensOut,
       Date.now() - start,
+      llmPath,
     );
   }
 
@@ -365,16 +412,14 @@ export class MainAgent {
     tokensIn: number,
     tokensOut: number,
     durationMs: number,
+    llmPath: LlmPathTracker,
   ): ResearchOutput {
-    return {
-      answer,
-      shards,
-      iterations,
-      tokensIn,
-      tokensOut,
-      durationMs,
-      mode: this.llm?.isConfigured ? "llm" : "heuristic",
-    };
+    // Honest `mode`: report `llm` only if an LLM was configured AND at
+    // least one LLM call (decompose / review / synthesize) actually
+    // produced a non-fallback result. Otherwise report `heuristic`.
+    const mode: ResearchOutput["mode"] =
+      this.llm?.isConfigured && llmPath.llmSucceeded ? "llm" : "heuristic";
+    return { answer, shards, iterations, tokensIn, tokensOut, durationMs, mode };
   }
 }
 
@@ -400,3 +445,28 @@ function expandScope(scope: ReadonlyArray<SourceCategory>): Source[] {
 /** Re-export for tests + tools. */
 export { ResearchInputSchema };
 export type { ResearchInput };
+
+// ---------------------------------------------------------------------------
+// Helper: call `synthesize` and mark llmPath.llmSucceeded when the LLM
+// path actually produced the final answer. Heuristic synthesis produces
+// "No evidence was found..." or "# Findings: ..." — we treat those as
+// fallback markers.
+// ---------------------------------------------------------------------------
+async function trackSynthesizeLlm(
+  shards: ReadonlyArray<ParsedShard>,
+  prompt: string,
+  llm: LLMClient | null,
+  options: { outputFormat: "markdown" | "json" | "summary"; logger?: Pick<typeof rootLogger, "info" | "warn" | "error" | "debug">; counters?: { tokensIn: number; tokensOut: number } },
+  llmPath: LlmPathTracker,
+): Promise<string> {
+  const answer = await synthesize(shards, prompt, llm, options);
+  if (llm?.isConfigured) {
+    // Heuristic synthesize produces a known shape. Anything else is LLM output.
+    const looksHeuristic =
+      answer.startsWith("No evidence was found") ||
+      answer.startsWith("# Findings:") ||
+      answer.startsWith("Findings for:");
+    if (!looksHeuristic) llmPath.llmSucceeded = true;
+  }
+  return answer;
+}

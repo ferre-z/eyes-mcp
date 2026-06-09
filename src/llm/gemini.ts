@@ -99,7 +99,7 @@ export class OpenAICompatibleClient implements LLMClient {
     this.providerId = opts.provider.id;
     this.model = opts.model ?? opts.provider.defaultModel;
     this.baseUrl = opts.provider.baseUrl.replace(/\/$/, "");
-    this.timeoutMs = opts.timeoutMs ?? 60_000;
+    this.timeoutMs = opts.timeoutMs ?? 120_000;
     this.extraHeaders = opts.provider.extraHeaders ?? {};
   }
 
@@ -167,13 +167,19 @@ export class OpenAICompatibleClient implements LLMClient {
     // OpenAI-shape response:
     //   { choices: [{ message: { role, content }, finish_reason }],
     //     usage: { prompt_tokens, completion_tokens } }
+    // OpenRouter / Google AI Studio may also use: { input_tokens, output_tokens }.
     const obj = parsed as {
       choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
-      usage?: { prompt_tokens?: number; completion_tokens?: number };
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        input_tokens?: number;
+        output_tokens?: number;
+      };
     };
     const text = obj.choices?.[0]?.message?.content ?? "";
-    const tokensIn = obj.usage?.prompt_tokens ?? 0;
-    const tokensOut = obj.usage?.completion_tokens ?? 0;
+    const tokensIn = obj.usage?.prompt_tokens ?? obj.usage?.input_tokens ?? 0;
+    const tokensOut = obj.usage?.completion_tokens ?? obj.usage?.output_tokens ?? 0;
 
     let structured: unknown | undefined;
     if (options.responseSchema && text.length > 0) {

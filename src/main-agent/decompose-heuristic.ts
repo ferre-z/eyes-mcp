@@ -30,7 +30,9 @@ function makeShard(query: string, source: Source, why: string): Shard {
     id: `${source.category}-${slugifyShardId(query)}`,
     query,
     source,
-    why,
+    // Marker prefix lets the main agent detect when decomposition fell back
+    // to the heuristic path (so it can report an honest `mode`).
+    why: `[heuristic] ${why}`,
   };
 }
 

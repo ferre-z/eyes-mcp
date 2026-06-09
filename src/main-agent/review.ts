@@ -10,6 +10,7 @@ import { z } from "zod";
 import { logger as rootLogger } from "../util/logger.js";
 import type { LLMClient } from "../llm/client.js";
 import { buildReviewPrompt } from "../llm/prompts.js";
+import type { TokenCounters } from "./decompose.js";
 import type {
   ParsedShard,
   ReviewDecision,
@@ -55,6 +56,8 @@ export interface ReviewOptions {
   usedTokens: number;
   tokenBudget: number;
   logger?: Pick<typeof rootLogger, "info" | "warn" | "error" | "debug">;
+  /** Optional mutable counters — populated with the LLM call's token usage. */
+  counters?: TokenCounters;
 }
 
 /**
@@ -109,6 +112,7 @@ export async function review(
         llm,
         options,
         log,
+        options.counters,
       );
       return decision;
     } catch (err) {
@@ -131,6 +135,7 @@ async function llmReview(
   llm: LLMClient,
   options: ReviewOptions,
   log: ReviewOptions["logger"],
+  counters: TokenCounters | undefined,
 ): Promise<ReviewDecision> {
   const fullPrompt = buildReviewPrompt({
     originalPrompt,
@@ -152,6 +157,10 @@ async function llmReview(
     temperature: 0.2,
     maxTokens: 2048,
   });
+  if (counters) {
+    counters.tokensIn += result.tokensIn;
+    counters.tokensOut += result.tokensOut;
+  }
 
   let parsed: ReviewOutput | null = null;
   if (result.structured) {

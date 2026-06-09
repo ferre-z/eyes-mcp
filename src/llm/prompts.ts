@@ -142,7 +142,8 @@ export function buildSynthesizePrompt(ctx: SynthesizePromptContext): string {
   }[ctx.outputFormat];
 
   return `You are the lead researcher. Write the final answer to the caller's question
-using ONLY the evidence your sub-agents collected.
+using ONLY the evidence your sub-agents collected. Your output will be shown
+to the user verbatim — anything you write is part of the answer.
 
 ## Original question
 ${ctx.originalPrompt}
@@ -160,7 +161,15 @@ ${formatGuidance}
 
 ## Rules
 - Be precise. If the evidence doesn't support a claim, don't make it.
-- Cite your sources inline (use shard IDs).
-- Don't pad. If the answer is "no good evidence was found", say so.
+- Cite your sources inline (use shard IDs like [web:abc123]).
+- Don't pad. If the answer is "no good evidence was found", say so plainly.
+- DO NOT include any of the following — they are NOT for the user:
+    * Internal reasoning or thinking (no <thought>...</thought> blocks,
+      no "Note that the evidence...", no self-commentary).
+    * Lines starting with // (those are scratch notes, not answer text).
+    * The literal shard metadata strings like "Findings for:", "Query:",
+      "total: N items", "ok: true note: ...". Those are debug dumps.
+    * Any meta-commentary about the prompt, the chunks, or the task.
+- Just write the answer.
 `;
 }

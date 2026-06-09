@@ -19,9 +19,16 @@ const DecomposeOutputSchema = z.object({
 });
 type DecomposeOutput = z.infer<typeof DecomposeOutputSchema>;
 
+export interface TokenCounters {
+  tokensIn: number;
+  tokensOut: number;
+}
+
 export interface DecomposeOptions {
   /** Optional logger. */
   logger?: Pick<typeof rootLogger, "info" | "warn" | "error" | "debug">;
+  /** Optional mutable counters — populated with the LLM call's token usage. */
+  counters?: TokenCounters;
 }
 
 /**
@@ -41,11 +48,12 @@ export async function decompose(
   options: DecomposeOptions = {},
 ): Promise<Shard[]> {
   const log = options.logger ?? rootLogger;
+  const counters = options.counters;
   const cap = Math.max(1, maxShards);
 
   if (llm && llm.isConfigured) {
     try {
-      const shards = await llmDecompose(prompt, availableSources, cap, llm, log);
+      const shards = await llmDecompose(prompt, availableSources, cap, llm, log, counters);
       if (shards.length > 0) {
         return shards;
       }
@@ -70,6 +78,7 @@ async function llmDecompose(
   cap: number,
   llm: LLMClient,
   log: DecomposeOptions["logger"],
+  counters: TokenCounters | undefined,
 ): Promise<Shard[]> {
   const fullPrompt = buildDecomposePrompt({
     prompt,
@@ -82,6 +91,10 @@ async function llmDecompose(
     temperature: 0.2,
     maxTokens: 1024,
   });
+  if (counters) {
+    counters.tokensIn += result.tokensIn;
+    counters.tokensOut += result.tokensOut;
+  }
 
   // Prefer the structured result; fall back to parsing the raw text.
   let parsed: DecomposeOutput | null = null;
