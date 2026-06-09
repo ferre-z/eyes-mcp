@@ -67,34 +67,61 @@ There are at least five "SearXNG + Crawl4AI + MCP" wrappers already (see `02-exi
 
 ---
 
-## Install
+## Install (laptop)
 
 ```bash
-git clone https://github.com/your-org/eyes-mcp.git
+git clone https://github.com/ferre-z/eyes-mcp.git
 cd eyes-mcp
-cp .env.example .env       # edit GEMINI_API_KEY if you have one
-docker compose up
+npm install
+npm run build
+npm link                 # exposes `eyes` to your PATH
+hash -r                  # ensure shell sees the new command
+eyes --version           # should print 0.1.0
 ```
 
-The first run pulls three images: `searxng/searxng`, `unclecode/crawl4ai`, `redis`. Build pulls `node:20-alpine`. Total cold start: ~2 minutes.
+> **PATH note:** `npm link` puts `eyes` in your global `npm` bin dir. If `eyes --version` says "command not found", add that dir to PATH. Usually `~/.nvm/versions/node/v*/bin`, `~/.hermes/node/bin`, or `~/.local/bin` depending on your setup. `npm config get prefix` shows you where.
 
-**Important:** before exposing SearXNG to the network, replace `secret_key` in `searxng/settings.yml`:
+## First-time setup
+
+```bash
+eyes models pick         # interactive: provider → model → paste API key
+eyes doctor              # verify everything
+```
+
+This writes `~/.config/eyes/config.toml`. Re-run any time to switch.
+
+## Run the server
+
+```bash
+docker compose up -d     # starts searxng + crawl4ai + redis + eyes-mcp
+docker compose logs -f eyes-mcp
+```
+
+Service on `http://localhost:8787` — health at `/health`, MCP at `/mcp`.
+
+**Important:** before exposing SearXNG, replace the placeholder `secret_key` in `searxng/settings.yml`:
 
 ```bash
 openssl rand -hex 32
 ```
 
+## Configure
+
+The CLI uses `~/.config/eyes/config.toml` (TOML, hand-rolled — no dep). The Docker server uses env vars only.
+
 ---
 
-## Configure
+## Configure (env vars — used by the Docker server)
 
 All configuration is via environment variables. See [`.env.example`](./.env.example) for the full list with defaults. Highlights:
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `EYES_HTTP_PORT` | `8787` | HTTP listen port |
-| `GEMINI_API_KEY` | _(empty)_ | Optional. If unset, server runs in heuristic-only mode. |
-| `GEMINI_MODEL` | `gemma-4-31b-it` | Model served by the Gemini-compatible API |
+| `EYES_PROVIDER` | `google-ai-studio` | `google-ai-studio` or `openrouter` |
+| `EYES_MODEL` | `gemma-4-31b-it` | Model id for the chosen provider |
+| `GOOGLE_AI_STUDIO_API_KEY` | _(empty)_ | Optional. If unset, server runs in heuristic-only mode. |
+| `OPENROUTER_API_KEY` | _(empty)_ | Optional. Used when `EYES_PROVIDER=openrouter`. |
 | `SEARXNG_URL` | `http://searxng:8080` | Internal SearXNG endpoint |
 | `CRAWL4AI_URL` | `http://crawl4ai:11235` | Internal Crawl4AI endpoint |
 | `GITHUB_TOKEN` | _(empty)_ | Bumps GitHub REST rate limit 60/hr → 5000/hr |
@@ -103,6 +130,24 @@ All configuration is via environment variables. See [`.env.example`](./.env.exam
 | `EYES_MAX_ITERATIONS` | `2` | Max refinement iterations (cap 5) |
 | `EYES_TOKEN_BUDGET` | `80000` | Token budget for the main agent's context |
 | `EYES_TIME_BUDGET_SEC` | `120` | Wall-clock budget per request |
+
+## CLI quick reference
+
+```bash
+eyes                              # open the chat REPL
+eyes "your prompt"                # one-shot research
+eyes chat "prompt" --depth deep   # one-shot with depth
+eyes models list                  # show all free models across providers
+eyes models pick                  # interactive: provider + model + key
+eyes models current               # show active provider + model
+eyes config                       # interactive config editor
+eyes config get providers.model   # print a config value (secrets → ***)
+eyes config set providers.model llama-3.3-70b
+eyes config path                  # print the config file path
+eyes init                         # create the config file with defaults
+eyes doctor                       # check config + deps + LLM
+eyes serve                        # start the MCP HTTP server
+```
 
 ---
 
@@ -163,12 +208,9 @@ Eyes-MCP/
 
 ## Status
 
-**Build in progress.** This repo is the result of a parallel subagent build:
-- Subagent A (this) — skeleton, Docker, entrypoint, health, logger. ✅
-- Subagent B — main agent, LLM client, dispatcher, tool registration. ⏳
-- Subagent C — source adapters, parse layers. ⏳
+✅ **v0.1.0** — research MCP server, CLI, 10 source adapters, Google AI Studio + OpenRouter providers, full vitest suite (64/64 passing).
 
-After wire-up, see `03-architecture-main-and-swarm.md` for the full design.
+See [`03-architecture-main-and-swarm.md`](./03-architecture-main-and-swarm.md) for the design rationale and [`00-brief.md`](./00-brief.md) for the one-liner.
 
 ---
 
