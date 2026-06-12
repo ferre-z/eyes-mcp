@@ -25,6 +25,7 @@ import { chatOneShot, chatRepl } from "./chat.js";
 import { startServer } from "./server.js";
 import { configCmd } from "./config-cmd.js";
 import { initCmd } from "./init.js";
+import { setupCmd } from "./setup.js";
 import { doctor } from "./doctor.js";
 import { modelsCmd } from "./models.js";
 
@@ -32,6 +33,7 @@ export const cli = meow(
   `
 ${neon("Usage")}
   $ eyes                        ${dimRed("open the chat REPL")}
+  $ eyes setup                   ${dimRed("first-time wizard (recommended)")}
   $ eyes chat <prompt>          ${dimRed("one-shot research question")}
   $ eyes models list            ${dimRed("show all free models across providers")}
   $ eyes models pick            ${dimRed("interactive wizard: provider + model + key")}
@@ -53,7 +55,8 @@ ${neon("Options")}
   --no-color        ${dimRed("disable neon red output")}
 
 ${neon("Examples")}
-  $ eyes models pick                       ${dimRed("# first-time setup")}
+  $ eyes setup                           ${dimRed("# first-time install — try this first")}
+  $ eyes models pick                     ${dimRed("# add or change your LLM key")}
   $ eyes ${dimRed(`"what's the latest on gemma 4 31b?"`)}
   $ eyes chat ${dimRed(`"compare bun and deno for scripting"`)} --depth deep
   $ eyes config set providers.model llama-3.3-70b
@@ -84,6 +87,9 @@ try {
   switch (cmd) {
     case "serve":
       await startServer();
+      break;
+    case "setup":
+      exitCode = await setupCmd({ force: cli.flags.reveal });
       break;
     case "config":
       exitCode = await configCmd(rest, {
