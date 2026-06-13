@@ -10,7 +10,7 @@
 // `index.ts` populates.
 // =============================================================================
 
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import pLimit from "p-limit";
@@ -22,6 +22,7 @@ import type {
   ShardAdapter,
   ShardAdapterRegistry,
 } from "./types.js";
+import { validateAndLog } from "./validate-artifact.js";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -37,6 +38,8 @@ export interface DispatcherConfig {
   concurrency?: number;
   /** Per-shard adapter timeout, ms. Default 30000. */
   timeoutMs?: number;
+  /** If > 0, reuse an existing artifact on disk if its mtime is younger than this many ms. Default 0 (disabled). */
+  shardCacheTtlMs?: number;
   /** Inject adapters. If unset, the dispatcher will skip missing categories. */
   adapters?: ShardAdapterRegistry;
   /** Optional logger (per-request). Falls back to the root logger. */
@@ -65,6 +68,7 @@ async function runShard(
   depth: Depth,
   outPath: string,
   timeoutMs: number,
+  shardCacheTtlMs: number,
   registry: ShardAdapterRegistry,
   log: DispatcherConfig["logger"],
 ): Promise<RawShardResult> {
@@ -83,6 +87,22 @@ async function runShard(
     };
   }
 
+  // Cache path: if an artifact already exists and is younger than the TTL,
+  // reuse it instead of calling the adapter. The soft validator still runs
+  // on cached files so operators see warnings about stale/malformed shapes.
+  if (shardCacheTtlMs > 0) {
+    const cached = await loadCachedArtifact(outPath, shardCacheTtlMs, log);
+    if (cached) {
+      return {
+        shardId: shard.id,
+        ok: true,
+        rawPath: outPath,
+        adapterMs: 0,
+        cacheHit: true,
+      };
+    }
+  }
+
   try {
     await withTimeout(
       adapter.search(shard.query, shard.source.hint, depth, outPath, timeoutMs),
@@ -95,6 +115,28 @@ async function runShard(
     log?.error("dispatcher: shard failed", { shardId: shard.id, err: message });
     return { shardId: shard.id, ok: false, error: message, adapterMs: Date.now() - t0 };
   }
+}
+
+async function loadCachedArtifact(
+  outPath: string,
+  ttlMs: number,
+  log: DispatcherConfig["logger"],
+): Promise<boolean> {
+  try {
+    const s = await stat(outPath);
+    const ageMs = Date.now() - s.mtimeMs;
+    if (ageMs <= ttlMs) {
+      log?.debug("dispatcher: shard cache hit", {
+        path: outPath,
+        ageMs,
+        ttlMs,
+      });
+      return true;
+    }
+  } catch {
+    // File doesn't exist or is unreadable; treat as cache miss.
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +158,7 @@ export async function dispatchShards(
   const dataDir = (config.dataDir ?? process.env["EYES_DATA_DIR"] ?? "/data").replace(/\/$/, "");
   const concurrency = config.concurrency ?? DEFAULT_CONCURRENCY;
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const shardCacheTtlMs = config.shardCacheTtlMs ?? 0;
   const registry: ShardAdapterRegistry = config.adapters ?? {};
   const log = config.logger ?? rootLogger;
 
@@ -134,7 +177,14 @@ export async function dispatchShards(
   const tasks = shards.map((shard) =>
     limit(async () => {
       const outPath = path.join(shardsDir, `${shard.id}.json`);
-      const result = await runShard(shard, depth, outPath, timeoutMs, registry, log);
+      const result = await runShard(shard, depth, outPath, timeoutMs, shardCacheTtlMs, registry, log);
+      // Soft artifact validation at the boundary. The chunk layer is
+      // permissive and will produce a (possibly degraded) ParsedShard
+      // from weird input, so we log a warning rather than failing the
+      // shard. See src/dispatcher/validate-artifact.ts for rationale.
+      if (result.ok && result.rawPath && !result.cacheHit) {
+        await validateAndLog(result.rawPath, result.shardId, log);
+      }
       // Best-effort: persist a small status envelope so even failed shards
       // leave a trail. The parse layer will skip these.
       if (!result.ok) {

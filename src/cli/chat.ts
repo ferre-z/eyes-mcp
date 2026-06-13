@@ -18,6 +18,7 @@ import path from "node:path";
 import { MainAgent } from "../main-agent/index.js";
 import { OpenAICompatibleClient, getProvider } from "../llm/gemini.js";
 import type { LLMClient } from "../llm/client.js";
+import { parseRawShards } from "../parse/index.js";
 import { loadConfig } from "./config.js";
 import type { Logger } from "winston";
 import {
@@ -178,6 +179,8 @@ async function runTurn(
     dataDir,
     tokenBudget: cfg.agents.tokenBudget,
     timeBudgetSec: cfg.agents.timeBudgetSec,
+    shardCacheTtlMs: cfg.agents.shardCacheTtlMs,
+    parseRawShards,
   });
 
   const input: Record<string, unknown> = {

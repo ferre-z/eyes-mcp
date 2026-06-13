@@ -12,9 +12,7 @@
 // =============================================================================
 
 import { randomUUID } from "node:crypto";
-import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
-import { z } from "zod";
 import { logger as rootLogger } from "../util/logger.js";
 import type { LLMClient } from "../llm/client.js";
 import type {
@@ -57,6 +55,8 @@ export interface MainAgentConfig {
   concurrency?: number;
   /** Per-shard timeout, ms. Default 30000. */
   shardTimeoutMs?: number;
+  /** Reuse shard artifacts younger than this many ms. Default 0 (disabled). */
+  shardCacheTtlMs?: number;
   /** Total token budget for the main agent (covers decompose + review + synthesize). */
   tokenBudget?: number;
   /** Total wall-clock budget per request, seconds. */
@@ -64,17 +64,18 @@ export interface MainAgentConfig {
   /** Adapters owned by subagent C. Pass them in via main(). */
   adapters?: ShardAdapterRegistry;
   /**
-   * Parse layer — owned by subagent C. We inject a function so we can ship
-   * a stub now and swap in the real implementation later. The function takes
-   * a list of raw shard result files and returns the parsed chunks. The
-   * main agent NEVER sees raw content.
+   * Parse layer — REQUIRED. The function takes a list of raw shard result
+   * files and returns the parsed chunks. The main agent NEVER sees raw
+   * content. The production wiring is `parseRawShards` from
+   * `src/parse/index.js`; both the MCP server (src/tools/index.ts) and the
+   * CLI (src/cli/chat.ts) inject it.
    */
-  parseRawShards?: ParseRawShardsFn;
+  parseRawShards: ParseRawShardsFn;
   /** Optional per-request logger. */
   logger?: Pick<typeof rootLogger, "info" | "warn" | "error" | "debug">;
 }
 
-/** Function signature subagent C must implement for the parse layer. */
+/** Function signature the parse layer must implement. */
 export type ParseRawShardsFn = (
   shardResults: ReadonlyArray<{ shardId: string; ok: boolean; rawPath?: string; error?: string }>,
   options: { dataDir: string; maxChunksPerShard: number; depth: Depth },
@@ -94,83 +95,6 @@ const SOURCE_CATEGORIES: ReadonlyArray<SourceCategory> = [
 ];
 
 // ---------------------------------------------------------------------------
-// Stub parse layer — used until subagent C wires in the real one.
-//
-// Reads each shard's artifact file, looks for the shape the real parse
-// layer is expected to produce, and returns that. If the file is the
-// "error envelope" the dispatcher writes on failure, it returns a
-// zero-chunk ParsedShard so the main agent still sees the failure.
-// ---------------------------------------------------------------------------
-
-const ParsedArtifactSchema = z.object({
-  shardId: z.string().min(1),
-  source: z.enum(["web", "github", "reddit", "youtube", "hackernews", "arxiv", "wikipedia"]),
-  summary: z.string(),
-  chunks: z.array(
-    z.object({
-      text: z.string(),
-      url: z.string().optional(),
-      charOffset: z.number().int().nonnegative(),
-      tokenCount: z.number().int().nonnegative(),
-    }),
-  ),
-});
-
-export const stubParseRawShards: ParseRawShardsFn = async (shardResults, options) => {
-  const out: ParsedShard[] = [];
-  for (const r of shardResults) {
-    if (!r.ok || !r.rawPath) {
-      out.push({
-        shardId: r.shardId,
-        source: "web",
-        summary: r.error ? `Shard failed: ${r.error}` : "Shard produced no output.",
-        chunks: [],
-      });
-      continue;
-    }
-    try {
-      const raw = await readFile(r.rawPath, "utf8");
-      // Try the parsed-artifact shape first; fall back to a generic wrapper.
-      const obj = JSON.parse(raw);
-      if (obj && typeof obj === "object" && "chunks" in obj) {
-        const check = ParsedArtifactSchema.safeParse(obj);
-        if (check.success) {
-          // Cap per shard.
-          out.push({
-            shardId: check.data.shardId,
-            source: check.data.source,
-            summary: check.data.summary,
-            chunks: check.data.chunks.slice(0, options.maxChunksPerShard),
-          });
-          continue;
-        }
-      }
-      // Last-ditch: wrap any raw JSON as a single "chunks" entry.
-      out.push({
-        shardId: r.shardId,
-        source: "web",
-        summary: "Raw artifact was not in expected parse shape; showing as single chunk.",
-        chunks: [
-          {
-            text: typeof obj === "string" ? obj : JSON.stringify(obj).slice(0, 4000),
-            charOffset: 0,
-            tokenCount: Math.ceil(JSON.stringify(obj).length / 4),
-          },
-        ],
-      });
-    } catch (err) {
-      out.push({
-        shardId: r.shardId,
-        source: "web",
-        summary: `Parse failed: ${err instanceof Error ? err.message : String(err)}`,
-        chunks: [],
-      });
-    }
-  }
-  return out;
-};
-
-// ---------------------------------------------------------------------------
 // Main agent
 // ---------------------------------------------------------------------------
 
@@ -179,6 +103,7 @@ export class MainAgent {
   private readonly dataDir: string;
   private readonly concurrency: number;
   private readonly shardTimeoutMs: number;
+  private readonly shardCacheTtlMs: number;
   private readonly tokenBudget: number;
   private readonly timeBudgetSec: number;
   private readonly adapters: ShardAdapterRegistry;
@@ -186,14 +111,24 @@ export class MainAgent {
   private readonly logger: Pick<typeof rootLogger, "info" | "warn" | "error" | "debug">;
 
   constructor(config: MainAgentConfig) {
+    if (!config.parseRawShards) {
+      // Defensive runtime guard. TS already requires it on the type, but
+      // a `as any` cast at a callsite would silently bypass the type.
+      // Failing loudly here is the whole point of removing the stub.
+      throw new Error(
+        "MainAgent requires `parseRawShards` (import { parseRawShards } from '../parse/index.js'). " +
+          "The old stub parser is gone — it only understood an on-disk shape no adapter writes.",
+      );
+    }
     this.llm = config.llm;
     this.dataDir = (config.dataDir ?? process.env["EYES_DATA_DIR"] ?? "/data").replace(/\/$/, "");
     this.concurrency = config.concurrency ?? 4;
     this.shardTimeoutMs = config.shardTimeoutMs ?? 30_000;
+    this.shardCacheTtlMs = config.shardCacheTtlMs ?? 0;
     this.tokenBudget = config.tokenBudget ?? Number.parseInt(process.env["EYES_TOKEN_BUDGET"] ?? "80000", 10);
     this.timeBudgetSec = config.timeBudgetSec ?? Number.parseInt(process.env["EYES_TIME_BUDGET_SEC"] ?? "120", 10);
     this.adapters = config.adapters ?? {};
-    this.parseRawShards = config.parseRawShards ?? stubParseRawShards;
+    this.parseRawShards = config.parseRawShards;
     this.logger = config.logger ?? rootLogger;
   }
 
@@ -272,6 +207,7 @@ export class MainAgent {
         dataDir: this.dataDir,
         concurrency: this.concurrency,
         timeoutMs: this.shardTimeoutMs,
+        shardCacheTtlMs: this.shardCacheTtlMs,
         adapters: this.adapters,
         logger: log,
       });
@@ -342,9 +278,31 @@ export class MainAgent {
 
       if (decision.type === "return") {
         log.info("main-agent: returning answer", { iter, chars: decision.answer.length });
+        // Re-format the review's answer through synthesize() when the caller
+        // asked for a non-default outputFormat. The review step always returns
+        // a markdown-ish narrative, but the user may have asked for json or
+        // summary. Force the LLM path off here so we don't burn a second
+        // call — synthesize's heuristic path respects outputFormat.
+        let finalAnswer = decision.answer;
+        if (input.outputFormat !== "markdown") {
+          // synthesize()'s no-chunks branch returns a flat "No evidence was
+          // found..." string; we wrap it for json/summary callers.
+          if (allParsedShards.some((s) => s.chunks.length > 0)) {
+            finalAnswer = await synthesize(allParsedShards, input.prompt, null, {
+              outputFormat: input.outputFormat,
+              logger: log,
+            });
+          } else if (input.outputFormat === "json") {
+            finalAnswer = JSON.stringify({
+              answer: finalAnswer,
+              key_points: [],
+              sources: [],
+            });
+          }
+        }
         return this.buildOutput(
           input,
-          decision.answer,
+          finalAnswer,
           allShardsMeta,
           iterations,
           counters.tokensIn,

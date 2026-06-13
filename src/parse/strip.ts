@@ -13,7 +13,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Logger } from "winston";
 import type { Depth } from "../dispatcher/types.js";
-import { collapseWhitespace, splitSentences, stripHtml } from "./text.js";
+import { collapseWhitespace, splitSentences } from "./text.js";
+import { summarizeArtifact } from "./summarize.js";
 
 /** Shape subagent C uses everywhere else for an injected logger. */
 export type LoggerLike = Pick<Logger, "info" | "warn" | "error" | "debug">;
@@ -106,10 +107,13 @@ export async function stripShards(
  * the original artifact).
  */
 function stripByDepth(raw: string, depth: Depth): string {
-  // Step 0: turn the JSON artifact into a more text-friendly form. The
-  // adapters' `payload` field is where the real text lives; the rest
-  // is bookkeeping the main agent never wants to see.
-  let text = flattenPayload(raw);
+  // Step 0: turn the JSON artifact into a more text-friendly form. Each
+  // adapter has a registered summarizer that knows the shape of its
+  // payload; this produces a markdown-ish string with real paragraph
+  // structure (so the chunk layer's per-paragraph dedup actually has
+  // something to dedup). Unknown sources fall back to a generic
+  // JSON-stringify dumper.
+  let text = summarizeArtifact(raw);
 
   if (depth === "quick") {
     return text;
@@ -125,42 +129,6 @@ function stripByDepth(raw: string, depth: Depth): string {
   // deep: also drop sentences that appear > 3 times in this shard.
   text = dedupFrequentSentences(text);
   return text;
-}
-
-/** Extract a reasonable plain-text representation of an artifact's payload. */
-function flattenPayload(raw: string): string {
-  // Try to parse as JSON; if it fails just treat the whole thing as text.
-  let obj: unknown;
-  try {
-    obj = JSON.parse(raw);
-  } catch {
-    return stripHtml(raw);
-  }
-  if (!obj || typeof obj !== "object") {
-    return stripHtml(String(obj));
-  }
-  // Common shape: { shardId, source, query, fetchedAt, payload: <the good stuff> }
-  const rec = obj as Record<string, unknown>;
-  const payload = rec["payload"];
-  const query = typeof rec["query"] === "string" ? (rec["query"] as string) : "";
-  if (Array.isArray(payload)) {
-    const parts: string[] = [];
-    if (query) parts.push(`Query: ${query}\n`);
-    for (const item of payload) {
-      if (item && typeof item === "object") {
-        parts.push(flattenObject(item as Record<string, unknown>));
-      } else {
-        parts.push(String(item));
-      }
-    }
-    return stripHtml(parts.join("\n\n"));
-  }
-  if (payload && typeof payload === "object") {
-    const head = query ? `Query: ${query}\n\n` : "";
-    return stripHtml(head + flattenObject(payload as Record<string, unknown>));
-  }
-  // Fallback: stringify the whole record, but keep it short.
-  return stripHtml(flattenObject(rec));
 }
 
 /** One object's worth of text, formatted as "key: value" lines. */
@@ -184,15 +152,25 @@ function flattenObject(o: Record<string, unknown>): string {
   return lines.join("\n");
 }
 
-/** Drop lines that look like nav/footer boilerplate + blank lines. */
+/** Drop lines that look like nav/footer boilerplate. Preserves blank lines
+ * (which the chunk layer relies on as paragraph separators). */
 function dropNavFooter(text: string): string {
   const lines = text.split(/\r?\n/);
   const kept: string[] = [];
   for (const line of lines) {
-    if (line.trim().length === 0) continue;
+    if (line.trim().length === 0) {
+      // Collapse runs of blank lines to a single blank — keep paragraph
+      // structure but don't waste a 5KB artifact on 200 blank lines.
+      if (kept.length > 0 && kept[kept.length - 1] === "") continue;
+      kept.push("");
+      continue;
+    }
     if (NAV_FOOTER_REGEX.test(line)) continue;
     kept.push(line);
   }
+  // Strip trailing blank lines so the chunk layer doesn't see a phantom
+  // empty paragraph at the end.
+  while (kept.length > 0 && kept[kept.length - 1] === "") kept.pop();
   return kept.join("\n");
 }
 

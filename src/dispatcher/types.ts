@@ -68,6 +68,8 @@ export const RawShardResultSchema = z.object({
   error: z.string().optional(),
   /** Wall-clock ms spent in the adapter (excludes queue/dispatch overhead). */
   adapterMs: z.number().int().nonnegative().optional(),
+  /** True when the dispatcher reused an existing on-disk artifact. */
+  cacheHit: z.boolean().optional(),
 });
 export type RawShardResult = z.infer<typeof RawShardResultSchema>;
 

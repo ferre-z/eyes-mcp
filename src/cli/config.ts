@@ -53,6 +53,8 @@ export interface EyesConfig {
     tokenBudget: number;
     timeBudgetSec: number;
     defaultDepth: "quick" | "standard" | "deep";
+    /** How long a previously written shard artifact is reused instead of re-fetching. */
+    shardCacheTtlMs: number;
   };
   searxng: { url: string };
   crawl4ai: { url: string };
@@ -70,6 +72,7 @@ export const DEFAULTS: EyesConfig = {
     tokenBudget: 80_000,
     timeBudgetSec: 120,
     defaultDepth: "standard",
+    shardCacheTtlMs: 60_000,
   },
   searxng: { url: "http://localhost:8080" },
   crawl4ai: { url: "http://localhost:11235" },
@@ -324,6 +327,16 @@ function applyEnvOverrides(cfg: EyesConfig): void {
         if (v && v.length > 0) {
           const n = Number.parseInt(v, 10);
           if (Number.isFinite(n)) cfg.agents.timeBudgetSec = n;
+        }
+      },
+    ],
+    [
+      "EYES_SHARD_CACHE_TTL_MS",
+      () => {
+        const v = process.env["EYES_SHARD_CACHE_TTL_MS"];
+        if (v && v.length > 0) {
+          const n = Number.parseInt(v, 10);
+          if (Number.isFinite(n)) cfg.agents.shardCacheTtlMs = n;
         }
       },
     ],

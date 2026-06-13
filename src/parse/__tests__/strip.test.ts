@@ -50,8 +50,15 @@ beforeEach(() => {
   writeFileMock.mockResolvedValue(undefined);
 });
 
-/** Build a SearXNG-shaped raw artifact with a long, varied body. */
+/** Build a SearXNG-shaped raw artifact with a long, varied body.
+ * The snippets include nav-footer-ish words and a repeated sentence so the
+ * per-depth filters (nav/footer drop, frequent-sentence dedup) have
+ * something to bite on. The old test fixture used a "content" field that
+ * the new per-adapter summarizer doesn't read; we put the long text in
+ * the snippets instead. */
 function makeRaw(): string {
+  const repeatedSentence = "This is the actual content that should be preserved. ";
+  const snippet = `${repeatedSentence.repeat(20)} Navigation. All rights reserved. Privacy policy. Terms of service.`;
   return JSON.stringify({
     shardId: "web-abc",
     source: "searxng",
@@ -59,14 +66,9 @@ function makeRaw(): string {
     fetchedAt: "2026-01-01T00:00:00Z",
     payload: {
       results: [
-        { title: "Vitest | A blazing-fast unit test framework", url: "https://vitest.dev/" },
-        { title: "Getting started", url: "https://vitest.dev/guide/" },
+        { title: "Vitest | A blazing-fast unit test framework", url: "https://vitest.dev/", snippet },
+        { title: "Getting started", url: "https://vitest.dev/guide/", snippet },
       ],
-      content:
-        "Vitest is a fast unit test framework. " +
-        "Navigation. " +
-        "All rights reserved. " +
-        "This is the actual content that should be preserved. ".repeat(20),
     },
   });
 }
