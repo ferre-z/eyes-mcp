@@ -121,6 +121,40 @@ describe("setup: install.sh shellcheck", () => {
   });
 });
 
+describe("setup: shim no longer requires python3", () => {
+  // The shim installed by install.sh used to shell out to python3 for
+  // JSON encoding/decoding and pretty-printing. We replaced those with
+  // node calls (the eyes-mcp container requires node, so any host that
+  // installed us almost certainly has it). This test verifies the shim
+  // body no longer mentions python3.
+  it("embedded shim does not invoke python3", () => {
+    const installSh = path.join(__dirname, "..", "..", "..", "scripts", "install.sh");
+    const raw = readFileSync(installSh, "utf8");
+    // Pull out the heredoc body.
+    const match = /cat > "\$INSTALL_DIR\/bin\/eyes" <<'CLI'\n([\s\S]*?)\nCLI\n/.exec(raw);
+    expect(match).not.toBeNull();
+    const shimBody = match![1]!;
+    // Strip leading comment block (which is allowed to mention python3 in
+    // its "why we don't depend on it" explanation) and check the executable
+    // code below.
+    const codeLines = shimBody.split("\n").filter((l) => !l.trim().startsWith("#"));
+    const codeBody = codeLines.join("\n");
+    expect(codeBody).not.toMatch(/\bpython3\b/);
+  });
+
+  it("embedded shim does not depend on jq", () => {
+    // We use node, not jq, so the shim should not mention jq either.
+    const installSh = path.join(__dirname, "..", "..", "..", "scripts", "install.sh");
+    const raw = readFileSync(installSh, "utf8");
+    const match = /cat > "\$INSTALL_DIR\/bin\/eyes" <<'CLI'\n([\s\S]*?)\nCLI\n/.exec(raw);
+    expect(match).not.toBeNull();
+    const shimBody = match![1]!;
+    const codeLines = shimBody.split("\n").filter((l) => !l.trim().startsWith("#"));
+    const codeBody = codeLines.join("\n");
+    expect(codeBody).not.toMatch(/\bjq\b/);
+  });
+});
+
 describe("setup: env var override semantics", () => {
   it("EYES_PORT defaults to 51823 if unset", () => {
     delete process.env["EYES_PORT"];

@@ -131,13 +131,28 @@ mkdir -p "$INSTALL_DIR/bin"
 cat > "$INSTALL_DIR/bin/eyes" <<'CLI'
 #!/usr/bin/env bash
 # Minimal eyes CLI: talks to the local eyes-mcp container's HTTP API.
+#
+# This shim is intentionally tool-light. It uses `curl` (always present on
+# a system with Docker) and `node` (which the eyes-mcp container requires
+# anyway, so any host that ran the install via the published image almost
+# certainly has it). We deliberately do NOT depend on `python3` — it isn't
+# guaranteed on minimal Linux or stripped-down macOS installs.
+#
+# If `node` is missing, the one-shot research path prints a clear install
+# hint. All other subcommands (doctor, logs, stop/start/restart, upgrade,
+# help) work without node.
 PORT="${EYES_PORT:-51823}"
 HOST="${EYES_HOST:-127.0.0.1}"
 BASE="http://${HOST}:${PORT}"
 
 case "${1:-}" in
   doctor)
-    curl -fsS "$BASE/health" | python3 -m json.tool 2>/dev/null || curl -fsS "$BASE/health"
+    # Pretty-print if we have node, else raw.
+    if command -v node >/dev/null 2>&1; then
+      curl -fsS "$BASE/health" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{console.log(JSON.stringify(JSON.parse(d),null,2))}catch{console.log(d)}})'
+    else
+      curl -fsS "$BASE/health"
+    fi
     ;;
   logs) docker logs -f eyes ;;
   stop) docker stop eyes ;;
@@ -164,6 +179,13 @@ HELP
     ;;
   *)
     # One-shot research question via JSON-RPC initialize + tools/call.
+    # Requires `node` for JSON encoding/decoding. If absent, fail loud with
+    # an actionable hint.
+    if ! command -v node >/dev/null 2>&1; then
+      echo "eyes: one-shot research needs 'node' to encode the JSON request." >&2
+      echo "      Install Node 20+ (https://nodejs.org) or run the install via the 'eyes' shim from a system that has it." >&2
+      exit 1
+    fi
     PROMPT="$*"
     SESSION=$(curl -sS -i -X POST "$BASE/mcp" \
       -H "Content-Type: application/json" \
@@ -174,12 +196,15 @@ HELP
       echo "eyes: failed to initialize MCP session with $BASE" >&2
       exit 1
     fi
+    # Build the JSON request body in node, pass the prompt via env to avoid
+    # any quote-escaping landmines in the heredoc.
+    BODY=$(EYES_PROMPT="$PROMPT" node -e 'process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:2,method:"tools/call",params:{name:"research",arguments:{prompt:process.env.EYES_PROMPT}}}))')
     curl -sS -X POST "$BASE/mcp" \
       -H "Content-Type: application/json" \
       -H "Accept: application/json, text/event-stream" \
       -H "Mcp-Session-Id: $SESSION" \
-      -d "$(python3 -c "import json,sys; print(json.dumps({'jsonrpc':'2.0','id':2,'method':'tools/call','params':{'name':'research','arguments':{'prompt':sys.argv[1]}}}))" "$PROMPT")" \
-      | python3 -c "import json,sys; d=json.load(sys.stdin); t=d['result']['content'][0]['text']; inner=json.loads(t); print(inner.get('answer', t))"
+      -d "$BODY" \
+      | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const o=JSON.parse(d);const t=o.result.content[0].text;const inner=JSON.parse(t);console.log(inner.answer||t)}catch(e){console.log(d)}})'
     ;;
 esac
 CLI

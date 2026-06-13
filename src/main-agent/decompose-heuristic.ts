@@ -46,6 +46,12 @@ function makeShard(query: string, source: Source, why: string): Shard {
  *  3. If scope is multiple specific categories, one shard per scope + up to
  *     2 reformulations for the web category (if web is in scope, or added
  *     implicitly as fallback).
+ *
+ * `web` is always preferred when there's a single slot: it's the broadest
+ * source (SearXNG meta-search) and is almost always the right first pick
+ * when the caller hasn't said otherwise. So when normalized.length > 1 and
+ * cap >= 1, we put a web shard first, then fill the remaining cap with
+ * other sources.
  */
 export function decomposeHeuristic(
   prompt: string,
@@ -73,6 +79,25 @@ export function decomposeHeuristic(
   const hasWeb = normalized.some((s) => s.category === "web");
   const others = normalized.filter((s) => s.category !== "web");
 
+  // Web first (with a single reformulation) when there's room. This is
+  // the bug-fix: with cap=1 + general scope, we used to skip web entirely
+  // and pick `github` (the first non-web in STANDARD_CATEGORIES). Now
+  // web always wins the first slot when it's in scope (or implicit).
+  if (out.length < cap) {
+    const reformulations = reformulateQuery(prompt, 1);
+    for (const q of reformulations) {
+      if (out.length >= cap) break;
+      out.push(
+        makeShard(
+          q,
+          { category: "web" },
+          `Web search (${q === prompt ? "exact" : "paraphrased"}) — broadest coverage, first pick.`,
+        ),
+      );
+    }
+  }
+
+  // Then one shard per other source in scope.
   for (const src of others) {
     if (out.length >= cap) break;
     out.push(
@@ -84,9 +109,11 @@ export function decomposeHeuristic(
     );
   }
 
-  // Add web (explicit or implicit) with up to 2 reformulations.
-  if (hasWeb || out.length < cap) {
-    const reformulations = reformulateQuery(prompt, hasWeb ? 2 : 1);
+  // If the caller asked for more shards than sources+web and `hasWeb` was
+  // implicit (not in their scope list), they get a second web reformulation
+  // to fill the gap.
+  if (out.length < cap && hasWeb) {
+    const reformulations = reformulateQuery(prompt, 2).slice(1); // skip the one we already used
     for (const q of reformulations) {
       if (out.length >= cap) break;
       out.push(
